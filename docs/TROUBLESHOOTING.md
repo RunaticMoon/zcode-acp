@@ -491,7 +491,8 @@ signature of this bug.
 ### Start Plan (zcode-plan) providers fail headless — 1113 / signing errors
 
 **Experimental path in this fork:** set `ZCODE_ACP_START_PLAN=1` together with
-`ZCODE_PROVIDER=builtin:zai-start-plan` and `ZCODE_MODEL=GLM-5.3-Flash`. The bridge
+`ZCODE_PROVIDER=builtin:zai-start-plan` and `ZCODE_MODEL=GLM-5.3` (or another
+model returned for your account). The bridge
 uses the official ZCode CLI and the official runtime-auth contract:
 `requestAuth.apiKey` carries the desktop's `zcodejwttoken`, not its business
 OAuth token or a personal Coding Plan key. The existing encrypted-store
@@ -499,8 +500,11 @@ reader supplies it at each runtime-header request, so logging out or changing
 the desktop account invalidates the bridge's access without copying secrets.
 
 This opt-in requires `oauth:active_provider` to be `zai`, a current Z.ai access
-token, and a ZCode JWT. It advertises the installed CLI's bundled Start Plan
-models even when legacy `config.json` was never written. An explicit
+token, and a ZCode JWT. The bridge reads the same authenticated
+`/api/v1/zcode-plan/billing/balance` catalog as the desktop app before creating
+the model picker and account-provider snapshot. It uses the installed desktop
+version and the existing `telemetry-state.json` device identity; neither file
+is modified. An explicit
 unavailable verdict for this plan in `coding-plan-cache.json` is respected;
 unrelated Coding Plan verdicts do not disable Start Plan. The service still
 decides whether the account may make a request.
@@ -511,10 +515,20 @@ or support BigModel Start Plan. Keep the ZCode desktop login current. If the
 service requires a challenge or rejects the token, use the desktop app and
 check its login state. Changing the model name to a personal Coding Plan
 provider does not give a Start Plan account that separate subscription.
-The installed 3.15.3 bundle advertises GLM-5.3-Flash, GLM-5.2, and GLM-5-Turbo
-for Start Plan; it does not advertise full GLM-5.3. Select a model from that
-catalog rather than pinning an unavailable one. The default behavior below
-applies when this opt-in is unset.
+The 3.15.3 bundle's static Start Plan list can omit GLM-5.3 even when the
+account has access. The dynamic balance response replaces that membership;
+it can include both GLM-5.3 and GLM-5.3-Flash. Empty, inactive, pending, or
+expired entitlements never restore the static list. Results stay in memory
+for at most 60 seconds and are tied to the current desktop login. Failed
+lookups clear the exposed Start Plan list and are throttled for 30 seconds;
+authentication errors and rate limits are reported separately, with no
+automatic retry. Missing device identity means ZCode needs to be opened,
+not that the account has exhausted its quota.
+
+All five execution modes are supported: Plan, Build, Edit, Guarded, and Yolo.
+With `ZCODE_ACP_MODE=build`, fresh-session mode lists put Build first so Paseo
+also selects it by default; loaded sessions retain their existing selection.
+The default behavior below applies when the Start Plan opt-in is unset.
 
 **Symptom:** every turn fails with HTTP 429 error `1113` ("Insufficient
 balance or no resource package") or `ClientRequestSigningV4Error: Client

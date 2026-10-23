@@ -49,9 +49,16 @@ export function quotaAutoResumeEnabled(env: NodeJS.ProcessEnv = process.env): bo
 
 /** Mode a newly created session starts in (default "yolo"). */
 export function initialSessionMode(env: NodeJS.ProcessEnv = process.env): string {
+  return explicitInitialSessionMode(env) ?? "yolo";
+}
+
+/** Explicit launch preference, without promoting the unrestricted fallback. */
+export function explicitInitialSessionMode(
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
   const file = loadUserConfig(env).session?.mode;
   if (file !== undefined) return file;
-  return env.ZCODE_ACP_MODE || "yolo";
+  return env.ZCODE_ACP_MODE || undefined;
 }
 
 /**
