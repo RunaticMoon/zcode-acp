@@ -490,6 +490,32 @@ signature of this bug.
 
 ### Start Plan (zcode-plan) providers fail headless — 1113 / signing errors
 
+**Experimental path in this fork:** set `ZCODE_ACP_START_PLAN=1` together with
+`ZCODE_PROVIDER=builtin:zai-start-plan` and `ZCODE_MODEL=GLM-5.3-Flash`. The bridge
+uses the official ZCode CLI and the official runtime-auth contract:
+`requestAuth.apiKey` carries the desktop's `zcodejwttoken`, not its business
+OAuth token or a personal Coding Plan key. The existing encrypted-store
+reader supplies it at each runtime-header request, so logging out or changing
+the desktop account invalidates the bridge's access without copying secrets.
+
+This opt-in requires `oauth:active_provider` to be `zai`, a current Z.ai access
+token, and a ZCode JWT. It advertises the installed CLI's bundled Start Plan
+models even when legacy `config.json` was never written. An explicit
+unavailable verdict for this plan in `coding-plan-cache.json` is respected;
+unrelated Coding Plan verdicts do not disable Start Plan. The service still
+decides whether the account may make a request.
+Explicit provider disablement in legacy or personal provider settings is also respected.
+
+This fork does not refresh the desktop login, solve verification challenges,
+or support BigModel Start Plan. Keep the ZCode desktop login current. If the
+service requires a challenge or rejects the token, use the desktop app and
+check its login state. Changing the model name to a personal Coding Plan
+provider does not give a Start Plan account that separate subscription.
+The installed 3.15.3 bundle advertises GLM-5.3-Flash, GLM-5.2, and GLM-5-Turbo
+for Start Plan; it does not advertise full GLM-5.3. Select a model from that
+catalog rather than pinning an unavailable one. The default behavior below
+applies when this opt-in is unset.
+
 **Symptom:** every turn fails with HTTP 429 error `1113` ("Insufficient
 balance or no resource package") or `ClientRequestSigningV4Error: Client
 signing credential must contain one separator`, while the same account works

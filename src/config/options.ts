@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import { backendCapabilities } from "../backend/adapter.js";
+import { startPlanEnabled, startPlanRequestAuthFor } from "../backend/start-plan.js";
 import type { ZcodeReadResult } from "../backend/types.js";
 import { recordModelChoice } from "../lazy-sessions.js";
 import {
@@ -27,7 +28,7 @@ import {
 } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { isBroadcastSource, sendSessionUpdate, sendSessionUpdateToOthers } from "../handlers/io.js";
-import { configProviderIdFor } from "./account-provider.js";
+import { configProviderIdFor, startPlanModels } from "./account-provider.js";
 import { initialSessionMode } from "./settings.js";
 
 interface ProviderModelsJson {
@@ -200,6 +201,9 @@ export interface ModelRef {
  */
 export function providerSelectable(pid: string, p: ProviderEntry | undefined): boolean {
   if (!p) return false;
+  if (startPlanEnabled() && pid === "builtin:zai-start-plan") {
+    return p.enabled !== false && Boolean(startPlanRequestAuthFor(pid));
+  }
   if (isBuiltinProvider(pid)) return p.enabled === true && Boolean(p.options?.apiKey);
   if (p.enabled === false) return false;
   if (p.options?.apiKey) return true;
@@ -249,6 +253,15 @@ function appendPersonalOnlyProviders(
   }
 }
 
+function appendStartPlanModels(out: ModelRef[], pinned: string | undefined): void {
+  for (const model of startPlanModels()) {
+    if (pinned && configProviderIdFor(pinned) !== model.providerId) continue;
+    if (!out.some((m) => m.providerId === model.providerId && m.modelId === model.modelId)) {
+      out.push(model);
+    }
+  }
+}
+
 /**
  * Collect models from config.json for the dropdown, UNIONED with the desktop's
  * provider_config.json (3.12+): models the user added in the desktop app land
@@ -285,6 +298,7 @@ export function loadAllModels(): ModelRef[] {
       }
     }
     if (personal) appendPersonalOnlyProviders(out, personal, pinned);
+    appendStartPlanModels(out, pinned);
     // The default-provider fallback applies only to a MISSING/empty provider
     // map (fresh install). When providers ARE configured but none is usable
     // (all keyless/未启用, #156), returning [] is correct: the fallback would
@@ -305,6 +319,7 @@ export function loadAllModels(): ModelRef[] {
     // its providers before the fresh-install default kicks in.
     const out: ModelRef[] = [];
     if (personal) appendPersonalOnlyProviders(out, personal, process.env.ZCODE_PROVIDER);
+    appendStartPlanModels(out, process.env.ZCODE_PROVIDER);
     if (out.length > 0) return out;
     return [
       {

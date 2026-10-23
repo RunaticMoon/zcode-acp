@@ -32,6 +32,11 @@ import path from "node:path";
 import { readCredentialStoreSync } from "../backend/credential-store.js";
 import type { ZcodeBackend } from "../backend/client.js";
 import { BUILTIN_PROVIDER_ENV, builtinProviderEnv } from "../backend/resolve.js";
+import {
+  START_PLAN_PROVIDER_ID,
+  startPlanEnabled,
+  startPlanRequestAuthFor,
+} from "../backend/start-plan.js";
 import { log, warn, ZCODE_CREDS_PATH } from "../utils.js";
 
 /** The bundled provider-table file the CLI boots from. */
@@ -325,6 +330,27 @@ export function codingPlanRequestAuthFor(
   return stored ? { apiKey: stored } : null;
 }
 
+/** Fresh desktop OAuth installs do not populate legacy config.json models. */
+export function startPlanModels(): Array<{
+  providerId: string;
+  providerName: string;
+  modelId: string;
+}> {
+  if (!startPlanRequestAuthFor(START_PLAN_PROVIDER_ID)) return [];
+  const rule = readBuiltinTable()?.table.config?.providerConfigRules?.providerRules?.find(
+    (r) =>
+      r.providerId === START_PLAN_PROVIDER_ID &&
+      r.config?.access?.type === "zhipu-account" &&
+      r.config.access.accountType === "zai" &&
+      r.config.access.mode === "start-plan",
+  );
+  return (rule?.config?.builtinModelIds ?? []).map((modelId) => ({
+    providerId: configProviderIdFor(START_PLAN_PROVIDER_ID),
+    providerName: rule?.providerName ?? "Z.ai Start Plan",
+    modelId,
+  }));
+}
+
 /** The `provider/updateAccountConfig` payload (schema-verified shape). */ export interface AccountProviderPayload {
   revision: string;
   basedOnZCodeBuiltinRevision: string;
@@ -359,7 +385,10 @@ export function buildAccountProviderConfig(): AccountProviderPayload | null {
   const providers: AccountProviderPayload["providers"] = {};
   const states: AccountProviderPayload["states"] = {};
   for (const rule of rules) {
-    const entitled = enabled.has(configProviderIdFor(rule.providerId));
+    const entitled =
+      startPlanEnabled() && rule.providerId === START_PLAN_PROVIDER_ID
+        ? Boolean(startPlanRequestAuthFor(rule.providerId))
+        : enabled.has(configProviderIdFor(rule.providerId));
     providers[rule.providerId] = {
       builtinModelIds: rule.config?.builtinModelIds,
       access: { type: "zhipu-account", entitled },
