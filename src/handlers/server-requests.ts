@@ -23,6 +23,7 @@
 import type * as acp from "@agentclientprotocol/sdk";
 
 import type { ServerRequest, ZcodeBackend } from "../backend/client.js";
+import { getProjectTokenRequestAuth, hasProjectTokenOAuth } from "../backend/project-token.js";
 import type {
   ZcodeInteractionPermissionParams,
   ZcodeInteractionResponse,
@@ -47,7 +48,10 @@ import {
   splitAskUserQuestions,
   zcodePermissionToAcp,
 } from "../interaction/adapter.js";
-import { codingPlanRequestAuthFor } from "../config/account-provider.js";
+import {
+  codingPlanRequestAuthFor,
+  projectTokenCodingPlanProviderIds,
+} from "../config/account-provider.js";
 import { buildConfigOptions, buildModes } from "../config/options.js";
 import { interactionTimeoutMs } from "../config/settings.js";
 import { messages } from "../i18n.js";
@@ -1349,12 +1353,56 @@ export function answerProviderRuntimeHeaders(
   // (observed 2026-09-17: switch stuck, every send died with "unknown").
   const sel = (params as { modelSelection?: { providerId?: string }; providerId?: string })
     .modelSelection?.providerId;
-  const requestAuth = codingPlanRequestAuthFor(
-    sel ?? (params as { providerId?: string }).providerId,
-  );
+  const providerId = sel ?? (params as { providerId?: string }).providerId;
+  const scopedRequest =
+    params.expectedAccountScope !== undefined ||
+    params.rejectedProjectTokenFingerprint !== undefined;
+  if ((typeof providerId === "string" && hasProjectTokenOAuth(providerId)) || scopedRequest) {
+    // Claim the frame synchronously; token issuance must not block the backend
+    // reader or enqueue a second reply while compact/internal turns run.
+    const resolveAuth = async () => {
+      if (typeof providerId !== "string" || !projectTokenCodingPlanProviderIds().has(providerId)) {
+        return null;
+      }
+      if (
+        (params.expectedAccountScope !== undefined &&
+          typeof params.expectedAccountScope !== "string") ||
+        (params.rejectedProjectTokenFingerprint !== undefined &&
+          typeof params.rejectedProjectTokenFingerprint !== "string")
+      ) {
+        return null;
+      }
+      return getProjectTokenRequestAuth(providerId, {
+        expectedAccountScope: params.expectedAccountScope as string | undefined,
+        rejectedProjectTokenFingerprint: params.rejectedProjectTokenFingerprint as
+          string | undefined,
+      });
+    };
+    void resolveAuth()
+      .catch(() => null)
+      .then((requestAuth) => {
+        sendZcodeReply(
+          backend,
+          reqId,
+          requestAuth
+            ? { headersApplied: true, requestAuth }
+            : { headersApplied: false, errorMessage: CODING_PLAN_AUTH_UNAVAILABLE },
+        );
+      })
+      .catch(() => warn("  provider runtime headers: backend closed before OAuth reply"));
+    return true;
+  }
+  const requestAuth = codingPlanRequestAuthFor(providerId);
   if (requestAuth) {
     log("  provider runtime headers: serving the coding-plan API key (config.json or store)");
     sendZcodeReply(backend, reqId, { headersApplied: true, requestAuth });
+    return true;
+  }
+  if (providerId?.endsWith("-individual-coding-plan")) {
+    sendZcodeReply(backend, reqId, {
+      headersApplied: false,
+      errorMessage: CODING_PLAN_AUTH_UNAVAILABLE,
+    });
     return true;
   }
   // Start Plan providers (zcode-plan endpoints) ask their host to solve an
@@ -1385,3 +1433,7 @@ const PROVIDER_RUNTIME_HEADERS_UNAVAILABLE =
   "Start Plan providers require an Aliyun captcha session that only the " +
   "ZCode desktop app can provide. Use a GLM Coding Plan provider for " +
   "headless/editor sessions (see docs/TROUBLESHOOTING.md).";
+
+const CODING_PLAN_AUTH_UNAVAILABLE =
+  "Coding Plan authentication is unavailable. Open ZCode desktop and reconnect " +
+  "the individual Coding Plan account, then retry (see docs/TROUBLESHOOTING.md).";

@@ -27,7 +27,7 @@ import {
 } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { isBroadcastSource, sendSessionUpdate, sendSessionUpdateToOthers } from "../handlers/io.js";
-import { configProviderIdFor } from "./account-provider.js";
+import { configProviderIdFor, projectTokenCodingPlanModels } from "./account-provider.js";
 import { initialSessionMode } from "./settings.js";
 
 interface ProviderModelsJson {
@@ -259,6 +259,15 @@ function appendPersonalOnlyProviders(
  */
 export function loadAllModels(): ModelRef[] {
   const personal = loadPersonalModels();
+  const appendOAuthModels = (out: ModelRef[]) => {
+    const pinned = process.env.ZCODE_PROVIDER;
+    for (const model of projectTokenCodingPlanModels()) {
+      if (pinned && model.providerId !== configProviderIdFor(pinned)) continue;
+      if (!out.some((m) => m.providerId === model.providerId && m.modelId === model.modelId)) {
+        out.push(model);
+      }
+    }
+  };
   try {
     const cfg = readConfig() as ConfigShape;
     const out: ModelRef[] = [];
@@ -285,6 +294,7 @@ export function loadAllModels(): ModelRef[] {
       }
     }
     if (personal) appendPersonalOnlyProviders(out, personal, pinned);
+    appendOAuthModels(out);
     // The default-provider fallback applies only to a MISSING/empty provider
     // map (fresh install). When providers ARE configured but none is usable
     // (all keyless/未启用, #156), returning [] is correct: the fallback would
@@ -305,6 +315,7 @@ export function loadAllModels(): ModelRef[] {
     // its providers before the fresh-install default kicks in.
     const out: ModelRef[] = [];
     if (personal) appendPersonalOnlyProviders(out, personal, process.env.ZCODE_PROVIDER);
+    appendOAuthModels(out);
     if (out.length > 0) return out;
     return [
       {

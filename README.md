@@ -44,7 +44,10 @@ support text only. Audio transcription is not supported.
   ZCode CLI runtime also requires Node ≥ 22)
 - The ZCode CLI: auto-discovered from the desktop app bundle, or on `PATH`,
   or pointed at via `ZCODE_BIN` (see below)
-- ZCode credentials at `~/.zcode/v2/config.json` (created by the ZCode app)
+- A connected ZCode desktop account: legacy API-key credentials or a macOS
+  desktop OAuth individual Coding Plan login (3.15+) in `~/.zcode/v2`.
+  OAuth uses the app's saved project/key locator and short-lived project tokens;
+  no editor-side API key is required. See [authentication troubleshooting](docs/TROUBLESHOOTING.md#authentication--credential-errors-401-provider-auth-failed).
 
 ## Install
 
@@ -243,7 +246,7 @@ the remote hub daemon (`zcode-acp hub`), and the stdio server editors invoke
 
 ## ACP Registry
 
-This server is compatible with the [ACP Registry](https://agentclientprotocol.com/get-started/registry). It advertises a single `agent`-type auth method at `initialize` time — the GLM API key is read from `~/.zcode/v2/config.json` by the ZCode backend, so **no editor-side credentials are required**.
+This server is compatible with the [ACP Registry](https://agentclientprotocol.com/get-started/registry). It advertises a single `agent`-type auth method at `initialize` time and reuses the ZCode desktop connection (legacy API key or supported individual-plan OAuth), so **no editor-side credentials are required**.
 
 The registry submission assets live under [`registry/zcode-acp/`](registry/zcode-acp/) (`agent.json` + `icon.svg`). Once the package is published to npm, copy that directory into a fork of [`agentclientprotocol/registry`](https://github.com/agentclientprotocol/registry) and open a PR — the CI validates the `agent.json` schema, icon, and that `initialize` returns a non-empty `authMethods`.
 
@@ -342,8 +345,8 @@ adds no extra destinations.
 
 | Concern     | What & why                                                                                                                                                                                                                        |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Network     | Only one outbound request in the whole codebase: the quota GET (`open.bigmodel.cn` / `api.z.ai`), carrying just your API key — needed to fetch your usage numbers, sends no user content                                          |
-| Credentials | API key read from `~/.zcode/v2/config.json` to authenticate the ZCode subprocess and quota request. Never logged, never written elsewhere. OAuth handled entirely by the ZCode subprocess                                         |
+| Network     | Account authentication also POSTs to the official `api.z.ai` / `bigmodel.cn` project-token endpoint using the desktop business JWT and saved locator. Redirects are refused; no prompt or code is sent by this authentication request. Quota queries use `open.bigmodel.cn` / `api.z.ai`. |
+| Credentials | Legacy API keys come from the desktop config/store. Supported OAuth logins are read from the encrypted desktop store; short-lived project tokens stay in memory and are sent privately to the ZCode subprocess. Authentication does not create keys or write credentials. |
 | Disk        | No new files created. Writes only to the existing `~/.zcode/v2/tasks-index.sqlite` — this **syncs sessions to the ZCode app** so they appear in its history list and full-text search (stores the session title and first prompt) |
 | Logging     | Diagnostics to stderr for troubleshooting bridge issues. Even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are ever logged                                                                                                      |
 

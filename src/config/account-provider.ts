@@ -30,6 +30,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { readCredentialStoreSync } from "../backend/credential-store.js";
+import { discoverProjectTokenProviders } from "../backend/project-token.js";
 import type { ZcodeBackend } from "../backend/client.js";
 import { BUILTIN_PROVIDER_ENV, builtinProviderEnv } from "../backend/resolve.js";
 import { log, warn, ZCODE_CREDS_PATH } from "../utils.js";
@@ -215,6 +216,7 @@ function storeIndividualCodingPlanKey(accountProviderId: string): string | null 
  */
 function entitledBuiltinProviders(): Set<string> {
   const out = new Set<string>();
+  const verdictProviders = new Set<string>();
   const credsDir = path.dirname(ZCODE_CREDS_PATH);
   let sawVerdict = false;
   // 1) Desktop availability cache (authoritative: the resolved verdict).
@@ -225,6 +227,7 @@ function entitledBuiltinProviders(): Set<string> {
     const items = Object.entries(cache.entryStatus?.items ?? {});
     if (items.length > 0) sawVerdict = true;
     for (const [pid, entry] of items) {
+      verdictProviders.add(pid);
       if (entry?.status === "available") out.add(pid);
     }
   } catch {
@@ -238,12 +241,31 @@ function entitledBuiltinProviders(): Set<string> {
     let builtinEntries = 0;
     for (const [pid, p] of Object.entries(cfg.provider ?? {})) {
       if (!pid.startsWith("builtin:")) continue;
+      verdictProviders.add(pid);
       builtinEntries += 1;
       if (p?.enabled === true && p.options?.apiKey) out.add(pid);
     }
     if (builtinEntries > 0) sawVerdict = true;
   } catch {
     // unreadable config — the other sources decide
+  }
+  // OAuth has a family-specific account/locator. A verdict for a different
+  // family must not hide a newly connected account, but a verdict for THIS
+  // provider remains authoritative.
+  const oauthProviders = new Set(discoverProjectTokenProviders());
+  const rules =
+    readBuiltinTable()?.table.config?.providerConfigRules?.providerRules?.filter(
+      (r) => r.config?.access?.type === "zhipu-account",
+    ) ?? [];
+  for (const rule of rules) {
+    const legacyId = configProviderIdFor(rule.providerId);
+    if (
+      rule.config?.access?.mode === "individual-coding-plan" &&
+      oauthProviders.has(rule.providerId) &&
+      !verdictProviders.has(legacyId)
+    ) {
+      out.add(legacyId);
+    }
   }
   if (out.size > 0) return out;
   // 3) Fresh desktop-only layout (#320): no verdict-bearing source spoke, but
@@ -260,7 +282,7 @@ function entitledBuiltinProviders(): Set<string> {
       }
     }
   }
-  if (out.size > 0) return out;
+  if (out.size > 0 || sawVerdict) return out;
   // 4) Last resort only (everything above empty — a machine that has never
   //    written them): the Settings UI's remembered pick per family. This is a
   //    SELECTION record, not an entitlement — `zai` sitting there means the
@@ -279,6 +301,43 @@ function entitledBuiltinProviders(): Set<string> {
     // setting.json absent (headless-only) — nothing to infer
   }
   return out;
+}
+
+/** Desktop OAuth contexts usable by the bundled individual-plan providers. */
+export function projectTokenCodingPlanProviderIds(): Set<string> {
+  const discovered = new Set(discoverProjectTokenProviders());
+  const entitled = entitledBuiltinProviders();
+  const rules = readBuiltinTable()?.table.config?.providerConfigRules?.providerRules ?? [];
+  return new Set(
+    rules
+      .filter(
+        (rule) =>
+          rule.config?.access?.type === "zhipu-account" &&
+          rule.config.access.mode === "individual-coding-plan" &&
+          discovered.has(rule.providerId) &&
+          entitled.has(configProviderIdFor(rule.providerId)),
+      )
+      .map((rule) => rule.providerId),
+  );
+}
+
+/** Advertise the signed-in OAuth family's bundled models on fresh installs. */
+export function projectTokenCodingPlanModels(): Array<{
+  providerId: string;
+  providerName: string;
+  modelId: string;
+}> {
+  const available = projectTokenCodingPlanProviderIds();
+  const rules = readBuiltinTable()?.table.config?.providerConfigRules?.providerRules ?? [];
+  return rules.flatMap((rule) =>
+    available.has(rule.providerId)
+      ? (rule.config?.builtinModelIds ?? []).map((modelId) => ({
+          providerId: configProviderIdFor(rule.providerId),
+          providerName: rule.providerName ?? rule.providerId,
+          modelId,
+        }))
+      : [],
+  );
 }
 
 /**

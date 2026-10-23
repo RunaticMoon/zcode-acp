@@ -116,6 +116,35 @@ declined (Aliyun captcha — desktop app only, issue #123).
 
 ### Authentication / credential errors (401, provider auth failed)
 
+**Desktop OAuth (macOS, ZCode 3.15+):** `config.json` can legitimately be absent.
+Connect the individual Z.ai or BigModel Coding Plan in the desktop app. The bridge
+reads its encrypted business JWT, account profile, individual-plan selection, and
+saved project/key locator, then obtains a short-lived project access token from
+the official service. The bundled provider table supplies that account's models.
+This follows ZCode's [project-token contract](https://github.com/zai-org/ZCode/blob/main/docs/model-provider-project-access-token.md);
+it does not re-exchange the Z.ai business JWT or create API keys.
+
+Tokens are cached in memory, refreshed before expiry, and discarded when the
+login or locator changes. Concurrent requests share issuance. Rejected-token
+retries remain bound to the official account scope. A failed OAuth connection
+does not fall back to a historical API key. If authentication is unavailable,
+reconnect the individual plan in the desktop app; never paste credentials into
+an editor prompt or issue report. A missing locator, disabled key, explicit
+unavailable plan verdict, or expired login is not repaired by this bridge.
+Desktop product metadata must be readable from its macOS app bundle; other
+desktop platforms and raw standalone OAuth logins are not supported by this path.
+Team and Start Plan/captcha behavior is unchanged. The legacy quota command may
+still require an API key; this change covers model requests, not quota display.
+
+The same `GLM-5.3` label can use different plans. A successful desktop request
+on `account:zai-start-plan` (`zcode.z.ai/api/v1/zcode-plan/anthropic`) does not
+establish entitlement to `account:zai-individual-coding-plan`
+(`api.z.ai/api/anthropic`). If the latter returns `1113` while the desktop
+works, compare the provider IDs before treating it as an OAuth failure. This
+bridge does not convert a Start Plan login into a Coding Plan subscription.
+
+**Legacy API-key installations:**
+
 **Symptom:** turns fail with authentication errors (e.g. `401`, `provider auth failed`, `invalid api key`), or `~/.zcode/v2/config.json` is missing.
 
 **Why:** This bridge advertises agent-managed auth — it reads the GLM API key from `~/.zcode/v2/config.json` and forwards it to the ZCode subprocess. No editor-side API key or environment variable is involved. If the credentials file is absent, empty, or carries an expired/invalid key, every turn will fail at the first model call.
@@ -124,9 +153,7 @@ declined (Aliyun captcha — desktop app only, issue #123).
 
 1. Confirm the credentials file exists and has an enabled provider:
 
-   ```bash
-   cat ~/.zcode/v2/config.json
-   ```
+   Inspect the file locally without copying its contents into logs or chat.
    - There must be a `provider` entry with `"enabled": true`
    - Its `options.apiKey` must be present and non-empty
 

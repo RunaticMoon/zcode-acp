@@ -12,10 +12,26 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ServerRequest, ZcodeBackend } from "../src/backend/client.js";
 import type { PendingTurn, ZcodeAcpServer } from "../src/server.js";
+
+const { oauthPresent, oauthAuth, oauthProviders } = vi.hoisted(() => ({
+  oauthPresent: vi.fn(() => false),
+  oauthAuth: vi.fn(),
+  oauthProviders: vi.fn(() => new Set<string>()),
+}));
+vi.mock("../src/backend/project-token.js", () => ({
+  hasProjectTokenOAuth: oauthPresent,
+  getProjectTokenRequestAuth: oauthAuth,
+}));
+
+beforeEach(() => {
+  oauthPresent.mockReturnValue(false);
+  oauthAuth.mockReset();
+  oauthProviders.mockReturnValue(new Set());
+});
 
 vi.mock("../src/handlers/io.js", () => ({
   sendSessionUpdate: vi.fn().mockResolvedValue(undefined),
@@ -27,6 +43,7 @@ vi.mock("../src/config/account-provider.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/config/account-provider.js")>();
   return {
     ...actual,
+    projectTokenCodingPlanProviderIds: oauthProviders,
     codingPlanRequestAuthFor: vi.fn((providerId: string | undefined): { apiKey: string } | null =>
       providerId === "account:bigmodel-individual-coding-plan" ? { apiKey: "test-key" } : null,
     ),
@@ -131,6 +148,76 @@ describe("interaction/requestProviderRuntimeHeaders", () => {
 });
 
 describe("answerProviderRuntimeHeaders (arrival-time responder)", () => {
+  const method = "interaction/requestProviderRuntimeHeaders";
+  const providerId = "account:bigmodel-individual-coding-plan";
+
+  it("claims an OAuth frame immediately and replies once when issuance completes", async () => {
+    oauthPresent.mockReturnValue(true);
+    oauthProviders.mockReturnValue(new Set([providerId]));
+    let complete!: (value: unknown) => void;
+    oauthAuth.mockReturnValue(
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+    );
+    const backend = makeBackend([]);
+    expect(
+      answerProviderRuntimeHeaders(backend, 90, method, {
+        modelSelection: { providerId },
+        expectedAccountScope: "scope",
+        rejectedProjectTokenFingerprint: "old",
+      }),
+    ).toBe(true);
+    expect(backend.sendReply).not.toHaveBeenCalled();
+    expect(oauthAuth).toHaveBeenCalledWith(providerId, {
+      expectedAccountScope: "scope",
+      rejectedProjectTokenFingerprint: "old",
+    });
+    const auth = { apiKey: "temporary-token", apiKeyId: "key-id", accountScope: "scope" };
+    complete(auth);
+    await vi.waitFor(() => expect(backend.sendReply).toHaveBeenCalledTimes(1));
+    expect(backend.sendReply).toHaveBeenCalledWith(90, { headersApplied: true, requestAuth: auth });
+  });
+
+  it.each(["rejected", "missing", "ineligible", "bad-scope"])(
+    "fails closed for %s OAuth without using the old stored key",
+    async (failure) => {
+      oauthPresent.mockReturnValue(true);
+      oauthProviders.mockReturnValue(new Set(failure === "ineligible" ? [] : [providerId]));
+      if (failure === "rejected") oauthAuth.mockRejectedValue(new Error("secret must not escape"));
+      else oauthAuth.mockResolvedValue(null);
+      const backend = makeBackend([]);
+      expect(
+        answerProviderRuntimeHeaders(backend, 91, method, {
+          providerId,
+          ...(failure === "bad-scope" ? { expectedAccountScope: 42 } : {}),
+        }),
+      ).toBe(true);
+      await vi.waitFor(() => expect(backend.sendReply).toHaveBeenCalledTimes(1));
+      expect(backend.sendReply).toHaveBeenCalledWith(91, {
+        headersApplied: false,
+        errorMessage: expect.stringContaining("Coding Plan authentication"),
+      });
+      expect(JSON.stringify(vi.mocked(backend.sendReply).mock.calls)).not.toContain("secret");
+    },
+  );
+
+  it("does not use legacy keys for scoped retries after OAuth logout", async () => {
+    const backend = makeBackend([]);
+    expect(
+      answerProviderRuntimeHeaders(backend, 92, method, {
+        providerId,
+        expectedAccountScope: "previous-account",
+      }),
+    ).toBe(true);
+    await vi.waitFor(() => expect(backend.sendReply).toHaveBeenCalledTimes(1));
+    expect(backend.sendReply).toHaveBeenCalledWith(
+      92,
+      expect.objectContaining({ headersApplied: false }),
+    );
+    expect(oauthAuth).not.toHaveBeenCalled();
+  });
+
   // The backend asks for runtime headers before EVERY model request on a
   // zhipu-account provider; outside a turn loop (compact's internal turn,
   // session/goal set) the queued request went unanswered and the generation

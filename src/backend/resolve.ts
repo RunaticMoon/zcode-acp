@@ -108,7 +108,7 @@ function bundledZcodeCandidates(): string[] {
  * the desktop-app bundle locations. `null` when nothing is found — the caller
  * falls back to the bare name and lets spawn surface the failure.
  */
-function discoverZcodeBin(): string | null {
+export function discoverZcodeBin(): string | null {
   const onPath = whichSync("zcode");
   if (onPath) return onPath;
   for (const c of bundledZcodeCandidates()) {

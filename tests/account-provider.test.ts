@@ -49,6 +49,10 @@ vi.mock("../src/utils.js", async (importOriginal) => {
 });
 
 const { builtinProviderEnv } = vi.hoisted(() => ({ builtinProviderEnv: vi.fn() }));
+const { discoverProjectTokenProviders } = vi.hoisted(() => ({
+  discoverProjectTokenProviders: vi.fn((): string[] => []),
+}));
+vi.mock("../src/backend/project-token.js", () => ({ discoverProjectTokenProviders }));
 vi.mock("../src/backend/resolve.js", () => ({
   builtinProviderEnv,
   BUILTIN_PROVIDER_ENV: "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE",
@@ -59,6 +63,8 @@ import {
   buildAccountProviderConfig,
   codingPlanRequestAuthFor,
   configProviderIdFor,
+  projectTokenCodingPlanModels,
+  projectTokenCodingPlanProviderIds,
 } from "../src/config/account-provider.js";
 
 /** Minimal bundled table with two coding-plan providers (one zai, one bigmodel). */
@@ -102,6 +108,7 @@ let root: string;
 let tablePath: string;
 
 beforeEach(() => {
+  discoverProjectTokenProviders.mockReturnValue([]);
   root = mkdtempSync(path.join(tmpdir(), "acct-provider-"));
   const v2 = path.join(root, ".zcode", "v2");
   mkdirSync(v2, { recursive: true });
@@ -170,6 +177,62 @@ describe("provider id mapping", () => {
 });
 
 describe("buildAccountProviderConfig", () => {
+  it("does not let another family's legacy verdict hide a new OAuth connection", () => {
+    discoverProjectTokenProviders.mockReturnValue(["account:zai-individual-coding-plan"]);
+    writeFileSync(
+      zcodeCfgPath.value,
+      JSON.stringify({
+        provider: {
+          "builtin:bigmodel-coding-plan": { enabled: false },
+        },
+      }),
+    );
+    expect(projectTokenCodingPlanProviderIds()).toEqual(
+      new Set(["account:zai-individual-coding-plan"]),
+    );
+  });
+
+  it("restores the OAuth family's bundled models without a legacy API key", () => {
+    discoverProjectTokenProviders.mockReturnValue(["account:zai-individual-coding-plan"]);
+    const payload = buildAccountProviderConfig()!;
+    expect(payload.providers["account:zai-individual-coding-plan"]?.access.entitled).toBe(true);
+    expect(payload.providers["account:bigmodel-individual-coding-plan"]?.access.entitled).toBe(
+      false,
+    );
+    expect(payload.providers["account:bigmodel-team-coding-plan"]?.access.entitled).toBe(false);
+    expect(projectTokenCodingPlanProviderIds()).toEqual(
+      new Set(["account:zai-individual-coding-plan"]),
+    );
+    expect(
+      projectTokenCodingPlanModels().map(({ providerId, modelId }) => [providerId, modelId]),
+    ).toEqual([
+      ["builtin:zai-coding-plan", "GLM-5.3"],
+      ["builtin:zai-coding-plan", "GLM-5.3-Flash"],
+    ]);
+    expect(codingPlanRequestAuthFor("account:zai-individual-coding-plan")).toBeNull();
+  });
+
+  it("does not let OAuth or a remembered selection override an unavailable verdict", () => {
+    discoverProjectTokenProviders.mockReturnValue(["account:zai-individual-coding-plan"]);
+    writeFileSync(
+      path.join(dataRoot.value, "coding-plan-cache.json"),
+      JSON.stringify({
+        entryStatus: { items: { "builtin:zai-coding-plan": { status: "unavailable" } } },
+      }),
+    );
+    writeFileSync(
+      path.join(dataRoot.value, "setting.json"),
+      JSON.stringify({
+        modelProviderFamilySelectedKeys: { zai: "builtin:zai-coding-plan" },
+      }),
+    );
+    expect(
+      buildAccountProviderConfig()!.providers["account:zai-individual-coding-plan"]?.access
+        .entitled,
+    ).toBe(false);
+    expect(projectTokenCodingPlanModels()).toEqual([]);
+  });
+
   it("entitles only the plans the desktop availability cache marks available", () => {
     writeFileSync(
       path.join(root, ".zcode", "v2", "coding-plan-cache.json"),
