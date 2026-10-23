@@ -12,7 +12,7 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ServerRequest, ZcodeBackend } from "../src/backend/client.js";
 import type { PendingTurn, ZcodeAcpServer } from "../src/server.js";
@@ -33,10 +33,23 @@ vi.mock("../src/config/account-provider.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../src/backend/start-plan.js", () => ({
+  START_PLAN_PROVIDER_ID: "account:zai-start-plan",
+  startPlanEnabled: vi.fn(() => false),
+  startPlanRequestAuthFor: vi.fn(() => null),
+}));
+
+import { startPlanEnabled, startPlanRequestAuthFor } from "../src/backend/start-plan.js";
+
 import {
   answerProviderRuntimeHeaders,
   handleServerRequests,
 } from "../src/handlers/server-requests.js";
+
+beforeEach(() => {
+  vi.mocked(startPlanEnabled).mockReset().mockReturnValue(false);
+  vi.mocked(startPlanRequestAuthFor).mockReset().mockReturnValue(null);
+});
 
 function makeServer(): ZcodeAcpServer {
   return {
@@ -131,6 +144,34 @@ describe("interaction/requestProviderRuntimeHeaders", () => {
 });
 
 describe("answerProviderRuntimeHeaders (arrival-time responder)", () => {
+  it("reports missing or disabled opt-in desktop auth without claiming a captcha failure", () => {
+    vi.mocked(startPlanEnabled).mockReturnValue(true);
+    const backend = makeBackend([]);
+    answerProviderRuntimeHeaders(backend, 91, "interaction/requestProviderRuntimeHeaders", {
+      providerId: "account:zai-start-plan",
+    });
+    const [, result] = vi.mocked(backend.sendReply).mock.calls[0]!;
+    expect(result).toMatchObject({
+      headersApplied: false,
+      errorMessage: expect.stringContaining("desktop credentials"),
+    });
+    expect(JSON.stringify(result)).not.toContain("captcha");
+  });
+  it("answers an opted-in Start Plan request with its dedicated token", () => {
+    vi.mocked(startPlanRequestAuthFor).mockReturnValue({ apiKey: "start-token" });
+    const backend = makeBackend([]);
+    expect(
+      answerProviderRuntimeHeaders(backend, 90, "interaction/requestProviderRuntimeHeaders", {
+        providerId: "builtin:zai-start-plan",
+        modelSelection: { providerId: "account:zai-start-plan", modelId: "GLM-5.3" },
+      }),
+    ).toBe(true);
+    expect(startPlanRequestAuthFor).toHaveBeenCalledWith("account:zai-start-plan");
+    expect(backend.sendReply).toHaveBeenCalledWith(90, {
+      headersApplied: true,
+      requestAuth: { apiKey: "start-token" },
+    });
+  });
   // The backend asks for runtime headers before EVERY model request on a
   // zhipu-account provider; outside a turn loop (compact's internal turn,
   // session/goal set) the queued request went unanswered and the generation

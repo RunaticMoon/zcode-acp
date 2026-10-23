@@ -192,6 +192,16 @@ before any config would be readable.
 
 Every `ZCODE_ACP_*` preference variable in this table has a config-file
 field (see [User config file](#user-config-file)); the file value wins.
+The experimental `ZCODE_ACP_START_PLAN` switch described below is env-only.
+
+This fork offers an experimental Z.ai Start Plan path with
+`ZCODE_ACP_START_PLAN=1`, `ZCODE_PROVIDER=builtin:zai-start-plan`, and
+`ZCODE_MODEL=GLM-5.3-Flash`. It reads the current Z.ai login from the ZCode desktop
+credential store; no API key, separate gateway, or copied login is needed.
+It is disabled by default, does not implement verification challenges, and
+does not support BigModel Start Plan. See
+[Start Plan troubleshooting](docs/TROUBLESHOOTING.md#start-plan-zcode-plan-providers-fail-headless--1113--signing-errors)
+for the credential and compatibility limits.
 
 | Variable                           | Default             | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | ---------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

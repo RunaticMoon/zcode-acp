@@ -48,6 +48,11 @@ import {
   zcodePermissionToAcp,
 } from "../interaction/adapter.js";
 import { codingPlanRequestAuthFor } from "../config/account-provider.js";
+import {
+  START_PLAN_PROVIDER_ID,
+  startPlanEnabled,
+  startPlanRequestAuthFor,
+} from "../backend/start-plan.js";
 import { buildConfigOptions, buildModes } from "../config/options.js";
 import { interactionTimeoutMs } from "../config/settings.js";
 import { messages } from "../i18n.js";
@@ -1349,9 +1354,26 @@ export function answerProviderRuntimeHeaders(
   // (observed 2026-09-17: switch stuck, every send died with "unknown").
   const sel = (params as { modelSelection?: { providerId?: string }; providerId?: string })
     .modelSelection?.providerId;
-  const requestAuth = codingPlanRequestAuthFor(
-    sel ?? (params as { providerId?: string }).providerId,
-  );
+  const providerId = sel ?? (params as { providerId?: string }).providerId;
+  const startPlanAuth = startPlanRequestAuthFor(providerId);
+  if (startPlanAuth) {
+    log("  provider runtime headers: serving the opt-in Z.ai Start Plan desktop token");
+    sendZcodeReply(backend, reqId, { headersApplied: true, requestAuth: startPlanAuth });
+    return true;
+  }
+  if (
+    startPlanEnabled() &&
+    (providerId === START_PLAN_PROVIDER_ID || providerId === "builtin:zai-start-plan")
+  ) {
+    sendZcodeReply(backend, reqId, {
+      headersApplied: false,
+      errorMessage:
+        "Z.ai Start Plan desktop credentials are unavailable or this provider is disabled. " +
+        "Open ZCode and check the active Z.ai login and Start Plan availability.",
+    });
+    return true;
+  }
+  const requestAuth = codingPlanRequestAuthFor(providerId);
   if (requestAuth) {
     log("  provider runtime headers: serving the coding-plan API key (config.json or store)");
     sendZcodeReply(backend, reqId, { headersApplied: true, requestAuth });
