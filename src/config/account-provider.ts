@@ -32,6 +32,7 @@ import path from "node:path";
 import { readCredentialStoreSync } from "../backend/credential-store.js";
 import type { ZcodeBackend } from "../backend/client.js";
 import { BUILTIN_PROVIDER_ENV, builtinProviderEnv } from "../backend/resolve.js";
+import { resolveStartPlanCatalog, startPlanCatalog } from "../backend/start-plan-catalog.js";
 import {
   START_PLAN_PROVIDER_ID,
   startPlanEnabled,
@@ -55,7 +56,10 @@ interface BuiltinProviderRule {
 
 interface BuiltinTable {
   revision?: number;
-  config?: { providerConfigRules?: { providerRules?: BuiltinProviderRule[] } };
+  config?: {
+    providerConfigRules?: { providerRules?: BuiltinProviderRule[] };
+    modelConfigRules?: { builtinProviderModelRules?: Array<{ modelId?: string }> };
+  };
 }
 
 /**
@@ -337,17 +341,32 @@ export function startPlanModels(): Array<{
   modelId: string;
 }> {
   if (!startPlanRequestAuthFor(START_PLAN_PROVIDER_ID)) return [];
-  const rule = readBuiltinTable()?.table.config?.providerConfigRules?.providerRules?.find(
+  const table = readBuiltinTable()?.table;
+  const rule = table?.config?.providerConfigRules?.providerRules?.find(
     (r) =>
       r.providerId === START_PLAN_PROVIDER_ID &&
       r.config?.access?.type === "zhipu-account" &&
       r.config.access.accountType === "zai" &&
       r.config.access.mode === "start-plan",
   );
-  return (rule?.config?.builtinModelIds ?? []).map((modelId) => ({
+  if (!rule || startPlanCatalog()?.availability !== "available") return [];
+  // Canonical spellings come from the whole installed catalog. Start Plan's
+  // static membership is NOT a whitelist: desktop balance can grant GLM-5.3
+  // even when that rule only lists Flash. Unknown IDs retain the server spelling.
+  const known = new Map(
+    [
+      ...(table?.config?.providerConfigRules?.providerRules ?? []).flatMap(
+        (provider) => provider.config?.builtinModelIds ?? [],
+      ),
+      ...(table?.config?.modelConfigRules?.builtinProviderModelRules ?? []).flatMap((model) =>
+        model.modelId ? [model.modelId] : [],
+      ),
+    ].map((modelId) => [modelId.toLowerCase(), modelId]),
+  );
+  return (startPlanCatalog()?.modelIds ?? []).map((modelId) => ({
     providerId: configProviderIdFor(START_PLAN_PROVIDER_ID),
     providerName: rule?.providerName ?? "Z.ai Start Plan",
-    modelId,
+    modelId: known.get(modelId.toLowerCase()) ?? modelId,
   }));
 }
 
@@ -385,16 +404,22 @@ export function buildAccountProviderConfig(): AccountProviderPayload | null {
   const providers: AccountProviderPayload["providers"] = {};
   const states: AccountProviderPayload["states"] = {};
   for (const rule of rules) {
-    const entitled =
-      startPlanEnabled() && rule.providerId === START_PLAN_PROVIDER_ID
-        ? Boolean(startPlanRequestAuthFor(rule.providerId))
-        : enabled.has(configProviderIdFor(rule.providerId));
+    const startPlan = startPlanEnabled() && rule.providerId === START_PLAN_PROVIDER_ID;
+    const entitled = startPlan
+      ? startPlanCatalog()?.availability === "available"
+      : enabled.has(configProviderIdFor(rule.providerId));
     providers[rule.providerId] = {
-      builtinModelIds: rule.config?.builtinModelIds,
+      builtinModelIds: startPlan
+        ? startPlanModels().map((model) => model.modelId)
+        : rule.config?.builtinModelIds,
       access: { type: "zhipu-account", entitled },
     };
     states[rule.providerId] = {
-      availability: entitled ? "available" : "unavailable",
+      availability: startPlan
+        ? (startPlanCatalog()?.availability ?? "unavailable")
+        : entitled
+          ? "available"
+          : "unavailable",
       entitled,
       current: entitled,
     };
@@ -407,6 +432,26 @@ export function buildAccountProviderConfig(): AccountProviderPayload | null {
   };
 }
 
+// A live backend needs the same newly refreshed membership as its picker.
+// Remember only the public snapshot, never tokens or account identifiers.
+const pushedStartPlanCatalogs = new WeakMap<ZcodeBackend, string>();
+
+function startPlanSnapshotSignature(): string {
+  return JSON.stringify([startPlanCatalog(), startPlanModels().map((model) => model.modelId)]);
+}
+
+/** Refresh loaded-session registries only when Start Plan membership changes. */
+export async function syncStartPlanCatalog(
+  backend: ZcodeBackend,
+  nextId: () => number,
+): Promise<void> {
+  if (!startPlanEnabled()) return;
+  await resolveStartPlanCatalog();
+  if (pushedStartPlanCatalogs.get(backend) !== startPlanSnapshotSignature()) {
+    await pushAccountProviderConfig(backend, nextId);
+  }
+}
+
 /**
  * Push the account snapshot to the backend. Best-effort: a failure logs and
  * returns false — session creation must proceed regardless (the account
@@ -417,8 +462,10 @@ export async function pushAccountProviderConfig(
   backend: ZcodeBackend,
   nextId: () => number,
 ): Promise<boolean> {
+  await resolveStartPlanCatalog();
   const payload = buildAccountProviderConfig();
   if (!payload) return false;
+  const startPlanSignature = startPlanSnapshotSignature();
   try {
     const resp = await backend.request(
       nextId(),
@@ -438,6 +485,7 @@ export async function pushAccountProviderConfig(
     log(
       `account-provider: pushed ${result.providerCount ?? Object.keys(payload.providers).length} provider(s) (${result.status ?? "ok"})`,
     );
+    pushedStartPlanCatalogs.set(backend, startPlanSignature);
     return true;
   } catch (e) {
     warn(`account-provider: push threw: ${e instanceof Error ? e.message : String(e)}`);

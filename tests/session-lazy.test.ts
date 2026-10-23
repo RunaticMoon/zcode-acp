@@ -175,6 +175,7 @@ describe("session/new lazy creation", () => {
     const resp = await newSession(server, newSessionParams("/tmp/ws"));
 
     expect(resp.modes.currentModeId).toBe("yolo");
+    expect(resp.modes.availableModes[0].id).toBe("plan");
     const modeOpt = resp.configOptions.find((o) => o.id === "mode");
     expect(modeOpt?.currentValue).toBe("yolo");
   });
@@ -187,8 +188,18 @@ describe("session/new lazy creation", () => {
     // Before materialization there is no backend read to consult — the
     // placeholder must already show the mode session/create will send.
     expect(resp.modes.currentModeId).toBe("build");
+    // Paseo 0.12 keeps only availableModes in its provider catalog, then
+    // chooses the first entry. It must not turn this explicit build into plan.
+    expect(resp.modes.availableModes.map((m) => m.id)).toEqual([
+      "build",
+      "plan",
+      "edit",
+      "guarded",
+      "yolo",
+    ]);
     const modeOpt = resp.configOptions.find((o) => o.id === "mode");
     expect(modeOpt?.currentValue).toBe("build");
+    expect(modeOpt?.options[0].value).toBe("build");
   });
 });
 

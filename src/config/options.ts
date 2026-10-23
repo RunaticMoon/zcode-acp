@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import { backendCapabilities } from "../backend/adapter.js";
+import { resolveStartPlanCatalog, startPlanCatalog } from "../backend/start-plan-catalog.js";
 import { startPlanEnabled, startPlanRequestAuthFor } from "../backend/start-plan.js";
 import type { ZcodeReadResult } from "../backend/types.js";
 import { recordModelChoice } from "../lazy-sessions.js";
@@ -28,8 +29,8 @@ import {
 } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { isBroadcastSource, sendSessionUpdate, sendSessionUpdateToOthers } from "../handlers/io.js";
-import { configProviderIdFor, startPlanModels } from "./account-provider.js";
-import { initialSessionMode } from "./settings.js";
+import { configProviderIdFor, startPlanModels, syncStartPlanCatalog } from "./account-provider.js";
+import { explicitInitialSessionMode, initialSessionMode } from "./settings.js";
 
 interface ProviderModelsJson {
   [modelId: string]: { limit?: { context?: number } } | undefined;
@@ -202,7 +203,11 @@ export interface ModelRef {
 export function providerSelectable(pid: string, p: ProviderEntry | undefined): boolean {
   if (!p) return false;
   if (startPlanEnabled() && pid === "builtin:zai-start-plan") {
-    return p.enabled !== false && Boolean(startPlanRequestAuthFor(pid));
+    return (
+      p.enabled !== false &&
+      Boolean(startPlanRequestAuthFor(pid)) &&
+      startPlanCatalog()?.availability === "available"
+    );
   }
   if (isBuiltinProvider(pid)) return p.enabled === true && Boolean(p.options?.apiKey);
   if (p.enabled === false) return false;
@@ -254,12 +259,26 @@ function appendPersonalOnlyProviders(
 }
 
 function appendStartPlanModels(out: ModelRef[], pinned: string | undefined): void {
+  if (startPlanEnabled()) {
+    // An authenticated remote snapshot replaces legacy/personal Start Plan
+    // membership, including when the server explicitly grants no models.
+    for (let i = out.length - 1; i >= 0; i--) {
+      if (configProviderIdFor(out[i]!.providerId) === "builtin:zai-start-plan") out.splice(i, 1);
+    }
+  }
   for (const model of startPlanModels()) {
     if (pinned && configProviderIdFor(pinned) !== model.providerId) continue;
     if (!out.some((m) => m.providerId === model.providerId && m.modelId === model.modelId)) {
       out.push(model);
     }
   }
+}
+
+function startPlanSelected(): boolean {
+  const pinned = process.env.ZCODE_PROVIDER;
+  return (
+    startPlanEnabled() && (!pinned || configProviderIdFor(pinned) === "builtin:zai-start-plan")
+  );
 }
 
 /**
@@ -305,6 +324,7 @@ export function loadAllModels(): ModelRef[] {
     // re-advertise exactly the unusable provider — or one absent from the
     // user's config — and switching to it fails in applyModelSwitch.
     if (out.length === 0 && Object.keys(cfg.provider ?? {}).length === 0) {
+      if (startPlanSelected()) return [];
       return [
         {
           providerId: DEFAULT_PROVIDER_ID,
@@ -321,6 +341,7 @@ export function loadAllModels(): ModelRef[] {
     if (personal) appendPersonalOnlyProviders(out, personal, process.env.ZCODE_PROVIDER);
     appendStartPlanModels(out, process.env.ZCODE_PROVIDER);
     if (out.length > 0) return out;
+    if (startPlanSelected()) return [];
     return [
       {
         providerId: DEFAULT_PROVIDER_ID,
@@ -440,6 +461,23 @@ export function parseModelValue(value: string): { providerId: string; modelId: s
   return { providerId: value.slice(0, idx), modelId: value.slice(idx + 1) };
 }
 
+/**
+ * Some ACP catalogs retain the choices but discard currentModeId/currentValue
+ * (Paseo 0.12), then select the first choice. Honor an explicit launch mode in
+ * pending-session catalogs without changing loaded sessions or advertising an
+ * internal/invalid mode. With no preference, keep the historical order.
+ */
+function pendingModeOptions<T>(
+  options: T[],
+  zcodeSid: string | null,
+  id: (option: T) => string,
+): T[] {
+  const preferred = zcodeSid === null ? explicitInitialSessionMode() : undefined;
+  const index = preferred ? options.findIndex((option) => id(option) === preferred) : -1;
+  if (index <= 0) return options;
+  return [options[index]!, ...options.slice(0, index), ...options.slice(index + 1)];
+}
+
 /** Build the ACP SessionModeState ({currentModeId, availableModes}).
  *  zcodeSid null = pending session (session/new not yet materialized) — skip
  *  the backend read and return defaults. */
@@ -477,7 +515,11 @@ export async function buildModes(
     // does not advertise it (the backend still accepts it on the wire).
     // settings.mode only carries `current` (no `available` list, unlike
     // thoughtLevel), so the vocabulary is advertised here.
-    availableModes: ["plan", "build", "edit", "guarded", "yolo"].map((m) => ({
+    availableModes: pendingModeOptions(
+      ["plan", "build", "edit", "guarded", "yolo"],
+      zcodeSid,
+      (m) => m,
+    ).map((m) => ({
       id: m,
       name: capitalize(m),
     })),
@@ -520,6 +562,10 @@ export async function buildConfigOptions(
   zcodeSid: string | null,
   receiverRoot?: unknown,
 ): Promise<acp.SessionConfigOption[]> {
+  await resolveStartPlanCatalog();
+  if (zcodeSid !== null && startPlanEnabled()) {
+    await syncStartPlanCatalog(await server.ensureBackend(), () => server.nextId());
+  }
   let currentProviderId = "";
   let currentModelId = DEFAULT_MODEL_ID;
   let currentMode = zcodeSid === null ? initialSessionMode() : "build";
@@ -536,11 +582,20 @@ export async function buildConfigOptions(
     // relays the options into a picker (Multica's effort selector) would
     // otherwise offer tokens the runtime rejects ("nothink" was fiction,
     // "low" was missing).
-    const cur = loadAllModels()[0];
+    const available = loadAllModels();
+    const pinnedProvider = process.env.ZCODE_PROVIDER;
+    const pinnedModel = process.env.ZCODE_MODEL;
+    const cur =
+      (pinnedProvider && pinnedModel
+        ? available.find(
+            (model) =>
+              model.providerId === configProviderIdFor(pinnedProvider) &&
+              model.modelId === pinnedModel,
+          )
+        : undefined) ?? available[0];
     if (cur) {
-      // The advertised current model follows the dropdown's leading entry
-      // (the enabled provider's first model — what the runtime actually
-      // starts sessions with) rather than the legacy hardcoded "GLM-5.2".
+      // Match the runtime's configured model when it is actually granted;
+      // otherwise use the enabled provider's leading entry.
       // ACP clients skip a requested model switch when it equals the
       // advertised current value, so a stale fiction silently pinned the
       // wrong model whenever the requested id happened to match it.
@@ -625,7 +680,10 @@ export async function buildConfigOptions(
   // are always providerId\modelId. Builtin labels stay the bare modelId
   // unless two providers ship the same id; third-party labels always qualify.
   let modelOptions = buildModelSelectOptions(allModels);
-  if (!modelOptions.some((o) => o.value === currentModel)) {
+  if (
+    !modelOptions.some((o) => o.value === currentModel) &&
+    !(zcodeSid === null && startPlanSelected() && allModels.length === 0)
+  ) {
     // The current model isn't from an enabled provider (e.g. the session was
     // created with a now-disabled provider). Append it so the dropdown still
     // shows the active selection.
@@ -648,7 +706,11 @@ export async function buildConfigOptions(
       category: "mode" as acp.SessionConfigOptionCategory,
       type: "select",
       currentValue: currentMode,
-      options: [...CONFIG_META.mode.options],
+      options: pendingModeOptions(
+        [...CONFIG_META.mode.options],
+        zcodeSid,
+        (option) => option.value,
+      ),
     },
     {
       id: "thought",

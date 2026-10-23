@@ -196,8 +196,15 @@ The experimental `ZCODE_ACP_START_PLAN` switch described below is env-only.
 
 This fork offers an experimental Z.ai Start Plan path with
 `ZCODE_ACP_START_PLAN=1`, `ZCODE_PROVIDER=builtin:zai-start-plan`, and
-`ZCODE_MODEL=GLM-5.3-Flash`. It reads the current Z.ai login from the ZCode desktop
+`ZCODE_MODEL=GLM-5.3` (when your account advertises it). It reads the current Z.ai login from the ZCode desktop
 credential store; no API key, separate gateway, or copied login is needed.
+The model picker and backend registry use the account's current Start Plan
+balance catalog, including GLM-5.3 or Flash when granted, instead of the app
+bundle's static model list. This requires the existing desktop device identity
+and the installed app version; the bridge does not create either.
+Set `ZCODE_ACP_MODE=build` to start in Build and place it first for clients such
+as Paseo that default to the first mode. Plan, Build, Edit, Guarded, and Yolo
+remain selectable; existing sessions retain their chosen mode.
 It is disabled by default, does not implement verification challenges, and
 does not support BigModel Start Plan. See
 [Start Plan troubleshooting](docs/TROUBLESHOOTING.md#start-plan-zcode-plan-providers-fail-headless--1113--signing-errors)

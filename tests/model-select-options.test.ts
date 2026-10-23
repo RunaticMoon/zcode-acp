@@ -58,6 +58,48 @@ const { buildConfigOptions, buildModes, formatModelValue, loadAllModels, parseMo
 
 afterEach(() => {
   fakeConfig = collidingPlansConfig();
+  vi.unstubAllEnvs();
+});
+
+describe("pending mode catalog defaults", () => {
+  it.each(["plan", "build", "edit", "guarded", "yolo"])(
+    "keeps all supported choices and advertises explicit %s first",
+    async (preferred) => {
+      vi.stubEnv("ZCODE_ACP_MODE", preferred);
+      const server = new ZcodeAcpServer();
+      const modes = await buildModes(server, null);
+      const option = (await buildConfigOptions(server, null)).find((o) => o.id === "mode");
+      expect(modes.currentModeId).toBe(preferred);
+      expect(modes.availableModes[0].id).toBe(preferred);
+      expect(modes.availableModes.map((m) => m.id).sort()).toEqual([
+        "build",
+        "edit",
+        "guarded",
+        "plan",
+        "yolo",
+      ]);
+      expect(option?.options[0].value).toBe(preferred);
+    },
+  );
+
+  it.each(["auto", "invalid-mode"])(
+    "does not add internal or invalid %s to the picker",
+    async (mode) => {
+      vi.stubEnv("ZCODE_ACP_MODE", mode);
+      const server = new ZcodeAcpServer();
+      const modes = await buildModes(server, null);
+      const option = (await buildConfigOptions(server, null)).find((o) => o.id === "mode");
+      expect(modes.availableModes.map((m) => m.id)).toEqual([
+        "plan",
+        "build",
+        "edit",
+        "guarded",
+        "yolo",
+      ]);
+      expect(option?.options[0].value).toBe("plan");
+      expect(option?.options.some((o) => o.value === mode)).toBe(false);
+    },
+  );
 });
 
 describe("model configOptions uniqueness", () => {
@@ -208,6 +250,17 @@ describe("plan-mode display fold", () => {
     expect((await buildModes(server, "zc-plan-1")).currentModeId).toBe("plan");
     server.sessionPlanActive.delete("zc-plan-1");
     expect((await buildModes(server, "zc-plan-1")).currentModeId).toBe("yolo");
+  });
+
+  it("preserves a loaded session's mode and choice order despite a different launch default", async () => {
+    vi.stubEnv("ZCODE_ACP_MODE", "build");
+    const server = planServer();
+    const modes = await buildModes(server, "zc-existing");
+    const option = (await buildConfigOptions(server, "zc-existing")).find((o) => o.id === "mode");
+    expect(modes.currentModeId).toBe("yolo");
+    expect(modes.availableModes[0].id).toBe("plan");
+    expect(option?.currentValue).toBe("yolo");
+    expect(option?.options[0].value).toBe("plan");
   });
 
   it("buildConfigOptions sets the mode dropdown to plan while the flag is tracked", async () => {
